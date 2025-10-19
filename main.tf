@@ -1,3 +1,4 @@
+
 module "vpc_module" {
   source         = "./modules/networking"
   aws_region     = "us-east-1"
