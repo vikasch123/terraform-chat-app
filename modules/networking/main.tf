@@ -48,8 +48,13 @@ locals {
   ]
 }
 
+resource "aws_eip" "nat" {
+
+}
+
 resource "aws_nat_gateway" "django-chat-nat" {
-  subnet_id = local.private_subnet_ids[0]
+  allocation_id = aws_eip.nat.id
+  subnet_id     = local.private_subnet_ids[0]
 }
 
 resource "aws_route_table" "django-chat-public-rt" {

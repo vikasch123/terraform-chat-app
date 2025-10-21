@@ -46,10 +46,10 @@ module "ec2" {
   source = "./modules/ec2"
   instances = {
     "web" = {
-      ami_id        = "	ami-05338380e819c8869"
+      ami_id        = "ami-05338380e819c8869"
       instance_type = "t3.micro"
       subnet_id     = module.vpc_module.public_subnet_ids[0]
-      sg_ids        = [module.sg-module.security_group_ids["web-nginx-sg"]]
+      sg_ids        = [module.sg-module.security_group_ids["web"]]
       tags          = { Name = "web-nginx" }
     }
 
@@ -57,7 +57,7 @@ module "ec2" {
       ami_id        = "ami-054735a0b4055fdf9"
       instance_type = "t3.micro"
       subnet_id     = module.vpc_module.private_subnet_ids[0]
-      # sg_ids        = [module.sg-module.security_group_ids["django-app-sg"]]
+      sg_ids        = [module.sg-module.security_group_ids["app"]]
       tags = {
         Name = "django-app"
       }
@@ -67,7 +67,7 @@ module "ec2" {
       ami_id        = "ami-0eb67d30053311bfc"
       instance_type = "t3.micro"
       subnet_id     = module.vpc_module.private_subnet_ids[1]
-      # sg_ids        = [module.sg-module.security_group_ids["mysql-db-sg"]]
+      sg_ids        = [module.sg-module.security_group_ids["db"]]
       tags = {
         Name = "mysql-db"
       }
@@ -77,34 +77,57 @@ module "ec2" {
 
 module "sg-module" {
   source = "./modules/security-group"
-  sg_config = {
-    "web-nginx-sg" = {
-      name               = "web-nginx-sg"
-      vpc_id             = module.vpc_module.vpc_id
-      public_subnet_ids  = module.vpc_module.public_subnet_ids
-      private_subnet_ids = module.vpc_module.private_subnet_ids
-      allowed_ssh_cidr   = "0.0.0.0/0"
+  security_groups = {
+    web = {
+      description = "Web SG"
+      vpc_id      = module.vpc_module.vpc_id
       ingress_rules = [
-        {
-          from_port   = 80
-          to_port     = 80
-          protocol    = "tcp"
-          cidr_blocks = ["0.0.0.0/0"]
-          description = "allow tcp"
-        },
-
-        {
-          from_port   = 22
-          to_port     = 22
-          protocol    = "tcp"
-          cidr_blocks = ["0.0.0.0/0"]
-          description = "Allow ssh"
-
-        }
+        { from_port = 80, to_port = 80, protocol = "tcp", cidr_blocks = ["0.0.0.0/0"] }
       ]
+    }
+
+    db = {
+      description = "db-sg"
+      vpc_id      = module.vpc_module.vpc_id
+      ingress_rules = [
+        { from_port = 3306, to_port = 3306, protocol = "tcp" }
+      ]
+    }
+
+    app = {
+      description = "App SG"
+      vpc_id      = module.vpc_module.vpc_id
+      ingress_rules = [
+        { from_port = 8000, to_port = 8000, protocol = "tcp", cidr_blocks = ["10.0.0.0/16"], description = "Allow Django app traffic" }
+      ]
+
     }
   }
 }
+
+
+
+
+resource "aws_security_group_rule" "app_ssh_from_web" {
+  type                     = "ingress"
+  from_port                = 22
+  to_port                  = 22
+  protocol                 = "tcp"
+  security_group_id        = module.sg-module.security_group_ids["app"]
+  source_security_group_id = module.sg-module.security_group_ids["web"]
+  description              = "Allow SSH from web to app"
+}
+
+resource "aws_security_group_rule" "db_ssh_from_web" {
+  type                     = "ingress"
+  from_port                = 22
+  to_port                  = 22
+  protocol                 = "tcp"
+  security_group_id        = module.sg-module.security_group_ids["db"]
+  source_security_group_id = module.sg-module.security_group_ids["web"]
+  description              = "Allow SSH from web to db"
+}
+
 
 # module "sg-db" {
 #   source = "./modules/security_group"
