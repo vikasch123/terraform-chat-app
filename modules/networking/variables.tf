@@ -24,7 +24,14 @@ variable "vpc_name" {
     error_message = "The VPC must have a non-empty name."
   }
 }
+# local {
+#}
+# ${local.project_name}
 
+
+# subnet 1 ->  cidr_block az, name, is_public
+# subnet 2 -> key-> subnets name , value -> object {      key->value 
+#cidr_}
 variable "subnet_config" {
   type = map(object({
     cidr_block        = string

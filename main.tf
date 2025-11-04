@@ -1,4 +1,17 @@
 
+# This module orchestrates the creation of a multi-tier web application:
+# - VPC with public and private subnets across multiple AZs
+# - Web server (Nginx) in public subnet acting as bastion host
+# - App server (Django) in private subnet
+# - Database server (MySQL) in private subnet
+# - Security groups with least-privilege access
+# - Auto-generated Ansible inventory for configuration management
+#
+# Network Architecture:
+# - Public subnets: 10.0.0.0/24, 10.0.2.0/24 (for web/load balancers)
+# - Private subnets: 10.0.1.0/24, 10.0.3.0/24 (for app/database)
+# - Web server acts as SSH proxy/bastion for private instances
+
 module "vpc_module" {
   source         = "./modules/networking"
   aws_region     = "us-east-1"
@@ -40,19 +53,87 @@ module "vpc_module" {
 }
 
 
-# calling the ec2 module to spin-up our ec2 instances in the infra
 
+# SSH Key Pairs for EC2 Instances
+
+# Generate RSA key pairs for secure SSH access to EC2 instances
+
+# Allocate Elastic IP for web server (Nginx/bastion)
+resource "aws_eip" "web_ip" {
+  instance = module.ec2.instance_ids["web"]
+}
+
+# Web server SSH key pair
+resource "tls_private_key" "web-key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "web-keypair" {
+  key_name   = "web-key"
+  public_key = tls_private_key.web-key.public_key_openssh
+}
+
+# App server SSH key pair
+resource "tls_private_key" "app-key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "app-keypair" {
+  key_name   = "app-key"
+  public_key = tls_private_key.app-key.public_key_openssh
+}
+
+# Database server SSH key pair
+resource "tls_private_key" "db-key" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "aws_key_pair" "db-keypair" {
+  key_name   = "db-key"
+  public_key = tls_private_key.db-key.public_key_openssh
+}
+
+# Save private keys to local files for SSH access
+resource "local_file" "web_key_file" {
+  content  = tls_private_key.web-key.private_key_pem
+  filename = "web.pem"
+  file_permission = "0600"
+}
+
+resource "local_file" "app_key_file" {
+  content  = tls_private_key.app-key.private_key_pem
+  filename = "app.pem"
+  file_permission = "0600"
+}
+
+resource "local_file" "db_key_file" {
+  content  = tls_private_key.db-key.private_key_pem
+  filename = "db.pem"
+  file_permission = "0600"
+}
+
+# =============================================================================
+# EC2 Instances Configuration
+# =============================================================================
 module "ec2" {
   source = "./modules/ec2"
   instances = {
+    # Web server (Nginx) - public subnet with Elastic IP
+    # Acts as bastion host for SSH access to private instances
     "web" = {
-      ami_id        = "ami-05338380e819c8869"
-      instance_type = "t3.micro"
-      subnet_id     = module.vpc_module.public_subnet_ids[0]
-      sg_ids        = [module.sg-module.security_group_ids["web"]]
-      tags          = { Name = "web-nginx" }
+      ami_id                      = "ami-05338380e819c8869"
+      instance_type               = "t3.micro"
+      subnet_id                   = module.vpc_module.public_subnet_ids[0]
+      sg_ids                      = [module.sg-module.security_group_ids["web"]]
+      tags                        = { Name = "web-nginx" }
+      associate_public_ip_address = true
+      key_name                    = aws_key_pair.web-keypair.key_name
     }
 
+    # App server (Django) - private subnet, accessed via web server
     "app" = {
       ami_id        = "ami-054735a0b4055fdf9"
       instance_type = "t3.micro"
@@ -61,8 +142,10 @@ module "ec2" {
       tags = {
         Name = "django-app"
       }
+      key_name = aws_key_pair.app-keypair.key_name
     }
 
+    # Database server (MySQL) - private subnet, accessed via web server
     "db" = {
       ami_id        = "ami-0eb67d30053311bfc"
       instance_type = "t3.micro"
@@ -71,10 +154,14 @@ module "ec2" {
       tags = {
         Name = "mysql-db"
       }
+      key_name = aws_key_pair.db-keypair.key_name
     }
   }
 }
 
+# =============================================================================
+# Security Groups Configuration
+# =============================================================================
 module "sg-module" {
   source = "./modules/security-group"
   security_groups = {
@@ -108,6 +195,11 @@ module "sg-module" {
 
 
 
+# =============================================================================
+# Additional Security Group Rules for SSH Proxy Access
+# =============================================================================
+# Enable SSH access from web server (bastion) to private instances
+
 resource "aws_security_group_rule" "app_ssh_from_web" {
   type                     = "ingress"
   from_port                = 22
@@ -128,98 +220,32 @@ resource "aws_security_group_rule" "db_ssh_from_web" {
   description              = "Allow SSH from web to db"
 }
 
+# Generate Ansible inventory file dynamically from module outputs
+resource "local_file" "ansible_inventory" {
+  content = templatefile("${path.module}/inventory.tmpl", {
+    # Web server configuration - public IP with direct access
+    web_public_ip = module.ec2.instance_public_ips["web"]
+    # Use abspath() to make key paths absolute, allowing inventory to work from any directory
+    web_key_path  = abspath(local_file.web_key_file.filename)
 
-# module "sg-db" {
-#   source = "./modules/security_group"
-#   sg_config = {
-#     "mysql-db-sg" = {
-#       name   = "mysql-db-sg"
-#       vpc_id = module.vpc_module.vpc_id
-#       ingress_rules = [
-#         {
-#           from_port       = 22
-#           to_port         = 22
-#           protocol        = "tcp"
-#           security_groups = [module.sg-web.security_group_ids["web-nginx-sg"]]
-#         }
-#       ]
-#     }
-#   }
-# }
+    # App server configuration - private IP accessed via bastion (web server)
+    app_private_ip = module.ec2.instance_private_ips["app"]
+    app_key_path   = abspath(local_file.app_key_file.filename)
 
+    # Database server configuration - private IP accessed via bastion (web server)
+    db_private_ip = module.ec2.instance_private_ips["db"]
+    db_key_path   = abspath(local_file.db_key_file.filename)
+  })
+  filename        = "${path.module}/inventory.yaml"
+  file_permission = "0644"
 
+  # Ensure this runs after all resources are created
+  depends_on = [
+    module.ec2,
+    local_file.web_key_file,
+    local_file.app_key_file,
+    local_file.db_key_file
+  ]
+}
 
-# module "sg-app" {
-#   source = "./modules/security_group"
-#   sg_config = {
-#     "django-app-sg" = {
-#       name   = "django-app-sg"
-#       vpc_id = module.vpc_module.vpc_id
-#       ingress_rules = [
-#         {
-#           from_port   = 8000
-#           to_port     = 8000
-#           protocol    = "tcp"
-#           cidr_blocks = module.vpc_module.private_subnet_cidrs
-#           description = "Allow Django app traffic"
-#         },
-#         {
-#           from_port       = 22
-#           to_port         = 22
-#           protocol        = "tcp"
-#           security_groups = [module.sg-web.security_group_ids["web-nginx-sg"]]
-#           description     = "Allow SSH from web server SG"
-#         }
-#       ]
-#     }
-#   }
-# }
-
-
-
-#       "django-app-sg" = {
-#         name               = "django-app-sg"
-#         vpc_id             = module.vpc_module.vpc_id
-#         public_subnet_ids  = module.vpc_module.public_subnet_ids
-#         private_subnet_ids = module.vpc_module.private_subnet_ids
-#         allowed_ssh_cidr   = "0.0.0.0/0"
-#         ingress_rules = [
-#           {
-#             from_port       = 8000
-#             to_port         = 8000
-#             protocol        = "tcp"
-#             cidr_blocks     = module.vpc_module.private_subnet_cidrs
-#             security_groups = [module.sg-module.security_group_ids["web-server-nginx"]]
-#             description     = "allow only port 8000 only from private subnets within the vpc"
-#           }
-#         ]
-#       }
-
-#       "mysql-db-sg" = {
-#         name   = "mysql-db-sg"
-#         vpc_id = module.vpc_module.vpc_id
-#         ingress_rules = [
-#           {
-#             from_port       = 3306
-#             to_port         = 3306
-#             protocol        = "tcp"
-#             security_groups = [module.sg-module.security_group_ids["web-server-nginx"]]
-#             description     = "to only allow traffic on port 3306 through web-server-nginx-sg"
-
-#           },
-#           {
-#             from_port       = 22
-#             to_port         = 22
-#             protocol        = "tcp"
-#             security_groups = [module.sg-module.security_group_ids["web-server-nginx"]]
-#             description     = "to  allow ssh  through web-server-nginx-sg"
-
-#           }
-#         ]
-#       }
-
-#     }
-
-#   }
-# }
 
